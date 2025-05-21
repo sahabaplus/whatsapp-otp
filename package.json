@@ -1,0 +1,19 @@
+{
+  "name": "whatsapp-bot",
+  "module": "index.ts",
+  "type": "module",
+  "scripts": {
+    "start": "bun ./src/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "open": "^10.1.0",
+    "redis": "^4.7.0"
+  }
+}
