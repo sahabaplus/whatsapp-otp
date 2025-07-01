@@ -17,6 +17,9 @@ import NodeCache from "node-cache";
 import { Boom } from "@hapi/boom";
 import fs from "fs";
 import path from "path";
+import axios from "axios";
+import { URL } from "url";
+import qrcode from "qrcode-terminal";
 
 interface SendMessageParams {
   phoneNumber: string;
@@ -26,7 +29,7 @@ interface SendMessageParams {
 
 interface SendMediaParams {
   phoneNumber: string;
-  media: Buffer | string; // Buffer for file data or string for file path
+  media: Buffer | string; // Buffer for file data, string for file path OR HTTPS URL
   mediaType: "image" | "video" | "document" | "audio";
   caption?: string;
   fileName?: string;
@@ -97,7 +100,7 @@ export class WhatsappBot {
         const sock = makeWASocket({
           version,
           logger: this.logger.child({ module: "socket" }),
-          printQRInTerminal: true,
+          printQRInTerminal: true, // Keep this enabled for logout scenarios
           auth: {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, this.logger),
@@ -130,11 +133,25 @@ export class WhatsappBot {
             console.log("Connection update:", update);
 
             if (qr) {
-              console.log("QR Code received - scan to connect");
+              console.log(qr);
+              try {
+                console.log(qrcode.generate(qr.trim(), { small: true }));
+              } catch {
+                //
+              }
+              console.log(
+                "📱 QR Code received - scan with WhatsApp to authenticate:"
+              );
+              console.log("   1. Open WhatsApp on your phone");
+              console.log("   2. Go to Settings > Linked Devices");
+              console.log("   3. Tap 'Link a Device'");
+              console.log("   4. Scan the QR code above");
             }
 
             if (connection === "close") {
-              const shouldReconnect = this.shouldReconnect(lastDisconnect);
+              const shouldReconnect = await this.shouldReconnect(
+                lastDisconnect
+              );
 
               if (
                 shouldReconnect &&
@@ -240,13 +257,15 @@ export class WhatsappBot {
     });
   }
 
-  private shouldReconnect(lastDisconnect: any): boolean {
+  private async shouldReconnect(lastDisconnect: any): Promise<boolean> {
     const reason = (lastDisconnect?.error as Boom)?.output?.statusCode;
 
-    // Don't reconnect if logged out
+    // Handle logout - wipe auth and prepare for new QR scan
     if (reason === DisconnectReason.loggedOut) {
-      console.log("Device logged out, manual scan required");
-      return false;
+      console.log("🚪 Device logged out, wiping authentication store...");
+      await this.wipeAuthStore();
+      console.log("📱 Please scan the QR code to re-authenticate");
+      return true; // Allow reconnection with fresh auth
     }
 
     // Don't reconnect for these specific errors
@@ -276,6 +295,104 @@ export class WhatsappBot {
 
     // Return empty message if not found
     return proto.Message.fromObject({});
+  }
+
+  // Helper method to download media from HTTPS URL using axios
+  private async downloadFromUrl(url: string): Promise<Buffer> {
+    try {
+      console.log(`📥 Downloading media from: ${url}`);
+
+      const response = await axios.get(url, {
+        responseType: "arraybuffer",
+        timeout: 30000, // 30 seconds timeout
+        maxContentLength: 50 * 1024 * 1024, // 50MB max file size
+        maxBodyLength: 50 * 1024 * 1024,
+        headers: {
+          "User-Agent": "WhatsApp-Bot/1.0.0",
+          Accept: "*/*",
+        },
+      });
+
+      const buffer = Buffer.from(response.data);
+      console.log(`✅ Downloaded ${buffer.length} bytes from URL`);
+
+      return buffer;
+    } catch (error: any) {
+      if (error.code === "ECONNABORTED") {
+        throw new Error("Download timeout - file took too long to download");
+      } else if (error.response) {
+        throw new Error(
+          `HTTP ${error.response.status}: ${error.response.statusText}`
+        );
+      } else if (error.request) {
+        throw new Error("Network error - could not reach the URL");
+      } else {
+        throw new Error(`Download failed: ${error.message}`);
+      }
+    }
+  }
+
+  // Helper method to wipe authentication store
+  private async wipeAuthStore(): Promise<void> {
+    try {
+      const authPath = path.resolve("baileys_auth_info");
+
+      // Check if auth directory exists
+      if (!fs.existsSync(authPath)) {
+        console.log("🗂️ Auth directory doesn't exist, nothing to wipe");
+        return;
+      }
+
+      const files = await fs.promises.readdir(authPath);
+
+      console.log(`🧹 Wiping ${files.length} authentication files...`);
+
+      for (const file of files) {
+        try {
+          await fs.promises.unlink(path.join(authPath, file));
+          console.log(`   ✅ Deleted: ${file}`);
+        } catch (error) {
+          console.error(`   ❌ Failed to delete ${file}:`, error);
+        }
+      }
+
+      // Remove the directory itself
+      try {
+        await fs.promises.rmdir(authPath);
+        console.log("🗂️ Auth directory removed");
+      } catch (error) {
+        console.error("❌ Failed to remove auth directory:", error);
+      }
+
+      console.log("✅ Authentication store wiped successfully");
+    } catch (error) {
+      console.error("❌ Error wiping auth store:", error);
+      throw error;
+    }
+  }
+  private isUrl(str: string): boolean {
+    try {
+      const url = new URL(str);
+      return url.protocol === "http:" || url.protocol === "https:";
+    } catch {
+      return false;
+    }
+  }
+
+  // Helper method to get media buffer from various sources
+  private async getMediaBuffer(media: Buffer | string): Promise<Buffer> {
+    if (Buffer.isBuffer(media)) {
+      return media;
+    }
+
+    // Check if it's a URL
+    if (this.isUrl(media)) {
+      console.log(`📥 Downloading media from URL: ${media}`);
+      return await this.downloadFromUrl(media);
+    }
+
+    // Otherwise, treat as local file path
+    return await fs.promises.readFile(media);
   }
 
   public async sendMessage(params: SendMessageParams): Promise<boolean> {
@@ -361,18 +478,19 @@ export class WhatsappBot {
           {
             to: phoneNumber,
             fileName: params.fileName,
+            mediaSource:
+              typeof params.media === "string"
+                ? this.isUrl(params.media)
+                  ? "URL"
+                  : "File Path"
+                : "Buffer",
           }
         );
 
-        let mediaBuffer: Buffer;
+        // Get media buffer from URL, file path, or existing buffer
+        const mediaBuffer = await this.getMediaBuffer(params.media);
 
-        if (typeof params.media === "string") {
-          // If media is a file path
-          mediaBuffer = await fs.promises.readFile(params.media);
-        } else {
-          // If media is already a buffer
-          mediaBuffer = params.media;
-        }
+        console.log(`📦 Media buffer size: ${mediaBuffer.length} bytes`);
 
         let messageContent: AnyMessageContent;
 
@@ -481,6 +599,8 @@ export class WhatsappBot {
       "ECONNRESET",
       "ENOTFOUND",
       "ETIMEDOUT",
+      "Download timeout",
+      "Network error",
     ];
 
     return retryableMessages.some(
@@ -523,14 +643,43 @@ export class WhatsappBot {
   }
 
   public async disconnect(): Promise<void> {
-    if (this.sock) {
-      await this.sock.logout();
-      this.sock = undefined;
-    }
+    try {
+      if (this.sock) {
+        console.log("📱 Disconnecting WhatsApp bot...");
+        // Don't call logout() during normal disconnect to avoid wiping auth
+        // Just close the socket gracefully
+        this.sock.ws?.close();
+        this.sock = undefined;
+        console.log("✅ WhatsApp bot disconnected");
+      }
 
-    // Clear message store
-    this.messageStore.clear();
-    console.log("🧹 Cleared message store");
+      // Clear message store
+      this.messageStore.clear();
+      console.log("🧹 Cleared message store");
+    } catch (error) {
+      console.error("❌ Error during disconnect:", error);
+      // Don't throw - we want disconnect to always succeed
+    }
+  }
+
+  public async forceLogout(): Promise<void> {
+    try {
+      if (this.sock) {
+        console.log("🚪 Forcing logout and wiping auth store...");
+        await this.sock.logout();
+        this.sock = undefined;
+      }
+      await this.wipeAuthStore();
+      console.log("✅ Forced logout completed");
+    } catch (error) {
+      console.error("❌ Error during force logout:", error);
+      // Still try to wipe auth store even if logout fails
+      try {
+        await this.wipeAuthStore();
+      } catch (wipeError) {
+        console.error("❌ Failed to wipe auth store:", wipeError);
+      }
+    }
   }
 
   public isConnected(): boolean {
