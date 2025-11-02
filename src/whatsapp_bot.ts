@@ -11,6 +11,7 @@ import makeWASocket, {
   type WAMessageKey,
   downloadMediaMessage,
   getContentType,
+  getUrlInfo,
 } from "@whiskeysockets/baileys";
 import P from "pino";
 import NodeCache from "node-cache";
@@ -25,6 +26,7 @@ interface SendMessageParams {
   phoneNumber: string;
   message: string;
   options?: Partial<AnyMessageContent>;
+  enableLinkPreview?: boolean; // Enable automatic link preview generation (default: true)
 }
 
 interface SendMediaParams {
@@ -379,6 +381,41 @@ export class WhatsappBot {
     }
   }
 
+  // Extract first URL from text message
+  private extractUrlFromText(text: string): string | null {
+    // Regular expression to match URLs
+    const urlRegex = /(https?:\/\/[^\s]+)/gi;
+    const matches = text.match(urlRegex);
+    return matches && matches.length > 0 ? matches[0] : null;
+  }
+
+  // Generate link preview for a URL
+  private async generateLinkPreview(url: string): Promise<any | null> {
+    try {
+      if (!this.sock) {
+        console.log("⚠️ No socket connection for link preview");
+        return null;
+      }
+
+      console.log(`🔗 Generating link preview for: ${url}`);
+
+      const linkPreview = await getUrlInfo(url, {
+        thumbnailWidth: 1024,
+        fetchOpts: {
+          timeout: 5000,
+        },
+        uploadImage: this.sock.waUploadToServer,
+      });
+
+      console.log("✅ Link preview generated successfully");
+      return linkPreview;
+    } catch (error: any) {
+      console.error("❌ Failed to generate link preview:", error.message);
+      // Don't throw - we'll send the message without preview
+      return null;
+    }
+  }
+
   // Helper method to get media buffer from various sources
   private async getMediaBuffer(media: Buffer | string): Promise<Buffer> {
     if (Buffer.isBuffer(media)) {
@@ -413,10 +450,25 @@ export class WhatsappBot {
           messageLength: params.message.length,
         });
 
-        const messageContent = {
+        // Build message content
+        const messageContent: any = {
           text: params.message,
           ...params.options,
         };
+
+        // Generate link preview if enabled (default: true) and URL is found
+        const enableLinkPreview = params.enableLinkPreview !== false;
+        const existingLinkPreview = (params.options as any)?.linkPreview;
+
+        if (enableLinkPreview && !existingLinkPreview) {
+          const url = this.extractUrlFromText(params.message);
+          if (url) {
+            const linkPreview = await this.generateLinkPreview(url);
+            if (linkPreview) {
+              messageContent.linkPreview = linkPreview;
+            }
+          }
+        }
 
         const response = await this.sock!.sendMessage(
           `${phoneNumber}@s.whatsapp.net`,

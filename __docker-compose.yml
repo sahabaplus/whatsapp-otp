@@ -1,0 +1,23 @@
+version: '3'
+
+services:
+  whatsapp-bot:
+    build: .
+    restart: always
+    volumes:
+      - ./baileys_auth_info:/app/baileys_auth_info
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=your_redis_password
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:alpine
+    restart: always
+    command: redis-server --requirepass your_redis_password
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:
