@@ -1,6 +1,7 @@
 // notification_service.ts
 import redis from "redis";
 import { EventEmitter } from "events";
+import P from "pino";
 
 export interface INotification {
   phoneNumber?: string; // Make optional to handle both formats
@@ -39,6 +40,14 @@ export class NotificationService extends EventEmitter {
   private maxRetries: number = 3;
   private retryDelay: number = 30000; // 30 seconds
 
+  private readonly logger = P(
+    {
+      timestamp: () => `,"time":"${new Date().toJSON()}"`,
+      level: "info",
+    },
+    P.destination("./notification-logs.txt")
+  );
+
   constructor() {
     super();
 
@@ -48,7 +57,10 @@ export class NotificationService extends EventEmitter {
       password: Bun.env.REDIS_PASSWORD || process.env.REDIS_PASSWORD,
       socket: {
         reconnectStrategy: (retries) => {
-          console.log(`Redis subscriber reconnect attempt ${retries}`);
+          this.logger.debug(
+            { retries, client: "subscriber" },
+            "Redis reconnect attempt"
+          );
           return Math.min(retries * 100, 3000);
         },
       },
@@ -59,7 +71,10 @@ export class NotificationService extends EventEmitter {
       password: Bun.env.REDIS_PASSWORD || process.env.REDIS_PASSWORD,
       socket: {
         reconnectStrategy: (retries) => {
-          console.log(`Redis client reconnect attempt ${retries}`);
+          this.logger.debug(
+            { retries, client: "redis" },
+            "Redis reconnect attempt"
+          );
           return Math.min(retries * 100, 3000);
         },
       },
@@ -72,38 +87,50 @@ export class NotificationService extends EventEmitter {
     try {
       // Set up error handlers before connecting
       this.subscriber.on("error", (error) => {
-        console.error("Redis subscriber error:", error);
+        this.logger.error(
+          { err: error, client: "subscriber" },
+          "Redis subscriber error"
+        );
         this.handleError(error);
       });
 
       this.redis.on("error", (error) => {
-        console.error("Redis client error:", error);
+        this.logger.error(
+          { err: error, client: "redis" },
+          "Redis client error"
+        );
         this.handleError(error);
       });
 
       // Connection event handlers
       this.subscriber.on("connect", () => {
-        console.log("✅ Redis subscriber connected");
+        this.logger.info(
+          { client: "subscriber" },
+          "Redis subscriber connected"
+        );
       });
 
       this.redis.on("connect", () => {
-        console.log("✅ Redis client connected");
+        this.logger.info({ client: "redis" }, "Redis client connected");
       });
 
       this.subscriber.on("reconnecting", () => {
-        console.log("🔄 Redis subscriber reconnecting...");
+        this.logger.info(
+          { client: "subscriber" },
+          "Redis subscriber reconnecting"
+        );
       });
 
       this.redis.on("reconnecting", () => {
-        console.log("🔄 Redis client reconnecting...");
+        this.logger.info({ client: "redis" }, "Redis client reconnecting");
       });
 
       // Connect to Redis
       await Promise.all([this.subscriber.connect(), this.redis.connect()]);
 
-      console.log("✅ Redis connections established");
+      this.logger.info("Redis connections established");
     } catch (error) {
-      console.error("❌ Failed to setup Redis connections:", error);
+      this.logger.error({ err: error }, "Failed to setup Redis connections");
       throw error;
     }
   }
@@ -126,7 +153,7 @@ export class NotificationService extends EventEmitter {
       this.startConnectionHealthCheck();
 
       this.emit(NotificationEvents.SERVICE_STARTED);
-      console.log("🚀 Notification service started successfully");
+      this.logger.info("Notification service started successfully");
     } catch (error) {
       this.handleError(error as Error);
       throw error;
@@ -134,7 +161,7 @@ export class NotificationService extends EventEmitter {
   }
 
   async stop() {
-    console.log("🛑 Stopping notification service...");
+    this.logger.info("Stopping notification service");
 
     this.isRunning = false;
 
@@ -156,7 +183,7 @@ export class NotificationService extends EventEmitter {
 
     await this.cleanup();
     this.emit(NotificationEvents.SERVICE_STOPPED);
-    console.log("✅ Notification service stopped");
+    this.logger.info("Notification service stopped");
   }
 
   private startMessageProcessing() {
@@ -172,14 +199,14 @@ export class NotificationService extends EventEmitter {
         );
 
         if (message) {
-          console.log("📨 Processing new message from queue");
+          this.logger.info("Processing new message from queue");
           await this.processMessage(message);
 
           // Remove from processing queue after successful processing
           await this.redis.LREM(this.processingQueueName, 1, message);
         }
       } catch (error) {
-        console.error("❌ Error in message processing:", error);
+        this.logger.error({ err: error }, "Error in message processing");
         this.emit(NotificationEvents.PROCESSING_ERROR, error);
 
         // Wait before retrying to prevent tight error loop
@@ -209,12 +236,12 @@ export class NotificationService extends EventEmitter {
         );
 
         if (retryMessage) {
-          console.log("🔄 Processing retry message");
+          this.logger.info("Processing retry message");
           await this.processMessage(retryMessage, true);
           await this.redis.LREM(this.processingQueueName, 1, retryMessage);
         }
       } catch (error) {
-        console.error("❌ Error in retry processing:", error);
+        this.logger.error({ err: error }, "Error in retry processing");
         this.emit(NotificationEvents.PROCESSING_ERROR, error);
       }
     }, this.retryDelay);
@@ -229,7 +256,7 @@ export class NotificationService extends EventEmitter {
         // Move any stuck messages from processing back to main queue
         await this.recoverStuckMessages();
       } catch (error) {
-        console.error("❌ Connection health check failed:", error);
+        this.logger.error({ err: error }, "Connection health check failed");
         this.handleError(error as Error);
       }
     }, 60000); // Check every minute
@@ -246,7 +273,10 @@ export class NotificationService extends EventEmitter {
       );
 
       if (stuckMessages.length > 0) {
-        console.log(`🔧 Recovering ${stuckMessages.length} stuck messages`);
+        this.logger.info(
+          { count: stuckMessages.length },
+          "Recovering stuck messages"
+        );
 
         for (const message of stuckMessages) {
           await this.redis.LPUSH(this.queueName, message);
@@ -254,7 +284,7 @@ export class NotificationService extends EventEmitter {
         }
       }
     } catch (error) {
-      console.error("❌ Error recovering stuck messages:", error);
+      this.logger.error({ err: error }, "Error recovering stuck messages");
     }
   }
 
@@ -276,17 +306,20 @@ export class NotificationService extends EventEmitter {
         notification.retryCount = 0;
       }
 
-      console.log("📱 Processing notification:", {
-        phoneNumber: notification.phoneNumber,
-        messageLength: notification.message?.length || 0,
-        mediaType: notification.mediaType || "text",
-        retryCount: notification.retryCount,
-        isRetry,
-      });
+      this.logger.info(
+        {
+          phoneNumber: notification.phoneNumber,
+          messageLength: notification.message?.length || 0,
+          mediaType: notification.mediaType || "text",
+          retryCount: notification.retryCount,
+          isRetry,
+        },
+        "Processing notification"
+      );
 
       this.emit(NotificationEvents.MESSAGE_RECEIVED, notification);
     } catch (error) {
-      console.error("❌ Error parsing notification:", error);
+      this.logger.error({ err: error }, "Error parsing notification");
 
       // Try to parse partial data for retry logic
       try {
@@ -299,7 +332,10 @@ export class NotificationService extends EventEmitter {
       } catch (parseError) {
         // Complete parsing failure - move to failed queue
         await this.redis.LPUSH(this.failedQueueName, message);
-        console.error("❌ Message moved to failed queue due to parse error");
+        this.logger.error(
+          { err: parseError },
+          "Message moved to failed queue due to parse error"
+        );
       }
 
       this.emit(NotificationEvents.PROCESSING_ERROR, { message, error });
@@ -315,8 +351,9 @@ export class NotificationService extends EventEmitter {
       const retryCount = (notification.retryCount || 0) + 1;
 
       if (retryCount <= this.maxRetries) {
-        console.log(
-          `🔄 Scheduling retry ${retryCount}/${this.maxRetries} for message`
+        this.logger.info(
+          { retryCount, maxRetries: this.maxRetries },
+          "Scheduling retry for message"
         );
 
         // Update retry count
@@ -331,8 +368,9 @@ export class NotificationService extends EventEmitter {
           JSON.stringify(updatedNotification)
         );
       } else {
-        console.error(
-          `❌ Max retries (${this.maxRetries}) reached, moving to failed queue`
+        this.logger.error(
+          { maxRetries: this.maxRetries },
+          "Max retries reached, moving to failed queue"
         );
 
         // Add to failed queue with error info
@@ -350,7 +388,7 @@ export class NotificationService extends EventEmitter {
         this.emit(NotificationEvents.RETRY_FAILED, failedNotification);
       }
     } catch (queueError) {
-      console.error("❌ Error handling failed message:", queueError);
+      this.logger.error({ err: queueError }, "Error handling failed message");
       this.emit(NotificationEvents.SERVICE_ERROR, queueError);
     }
   }
@@ -373,7 +411,7 @@ export class NotificationService extends EventEmitter {
         total: mainQueue + processingQueue + retryQueue,
       };
     } catch (error) {
-      console.error("❌ Error getting queue stats:", error);
+      this.logger.error({ err: error }, "Error getting queue stats");
       return {
         mainQueue: -1,
         processingQueue: -1,
@@ -386,7 +424,7 @@ export class NotificationService extends EventEmitter {
 
   public async reprocessFailedMessages(limit: number = 10) {
     try {
-      console.log(`🔄 Reprocessing up to ${limit} failed messages`);
+      this.logger.info({ limit }, "Reprocessing failed messages");
 
       for (let i = 0; i < limit; i++) {
         const failedMessage = await this.redis.RPOP(this.failedQueueName);
@@ -400,27 +438,30 @@ export class NotificationService extends EventEmitter {
           delete notification.failedAt;
 
           await this.redis.LPUSH(this.queueName, JSON.stringify(notification));
-          console.log(`✅ Moved failed message back to main queue`);
+          this.logger.info("Moved failed message back to main queue");
         } catch (parseError) {
           // Put back if can't parse
           await this.redis.LPUSH(this.failedQueueName, failedMessage);
-          console.error(`❌ Could not reprocess failed message:`, parseError);
+          this.logger.error(
+            { err: parseError },
+            "Could not reprocess failed message"
+          );
         }
       }
     } catch (error) {
-      console.error("❌ Error reprocessing failed messages:", error);
+      this.logger.error({ err: error }, "Error reprocessing failed messages");
     }
   }
 
   private async cleanup() {
     try {
-      console.log("🧹 Cleaning up Redis connections...");
+      this.logger.info("Cleaning up Redis connections");
 
       await Promise.all([this.subscriber.quit(), this.redis.quit()]);
 
-      console.log("✅ Redis connections closed");
+      this.logger.info("Redis connections closed");
     } catch (error) {
-      console.error("❌ Error during cleanup:", error);
+      this.logger.error({ err: error }, "Error during cleanup");
     }
   }
 }

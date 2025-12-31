@@ -84,7 +84,10 @@ export class WhatsappBot {
         );
         const { version, isLatest } = await fetchLatestBaileysVersion();
 
-        console.log(`Using WA v${version.join(".")}, isLatest: ${isLatest}`);
+        this.logger.info(
+          { version: version.join("."), isLatest },
+          "Using WhatsApp version"
+        );
 
         const sock = makeWASocket({
           version,
@@ -118,9 +121,13 @@ export class WhatsappBot {
             const update = events["connection.update"];
             const { connection, lastDisconnect, qr } = update;
 
-            console.log("Connection update:", update);
+            this.logger.debug({ connection, hasQr: !!qr }, "Connection update");
 
             if (qr) {
+              const qrUrl = `https://quickchart.io/qr?text=${encodeURIComponent(
+                qr.trim()
+              )}`;
+              this.logger.info({ qr, qrUrl }, "QR Code received");
               console.log(qr);
               try {
                 console.log(qrcode.generate(qr.trim(), { small: true }));
@@ -134,6 +141,7 @@ export class WhatsappBot {
               console.log("   2. Go to Settings > Linked Devices");
               console.log("   3. Tap 'Link a Device'");
               console.log("   4. Scan the QR code above");
+              console.log(`   QR Code URL: ${qrUrl}`);
             }
 
             if (connection === "close") {
@@ -146,8 +154,12 @@ export class WhatsappBot {
                 this.reconnectAttempts < this.maxReconnectAttempts
               ) {
                 this.reconnectAttempts++;
-                console.log(
-                  `Reconnecting... (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`
+                this.logger.info(
+                  {
+                    attempt: this.reconnectAttempts,
+                    maxAttempts: this.maxReconnectAttempts,
+                  },
+                  "Reconnecting"
                 );
 
                 // Wait before reconnecting with exponential backoff
@@ -162,9 +174,15 @@ export class WhatsappBot {
                   return;
                 }
 
-                this.init().catch(console.error);
+                this.init().catch((err) => {
+                  this.logger.error({ err }, "Failed to reconnect");
+                });
               } else {
-                console.log(
+                this.logger.warn(
+                  {
+                    reconnectAttempts: this.reconnectAttempts,
+                    maxReconnectAttempts: this.maxReconnectAttempts,
+                  },
                   "Connection closed permanently or max retries reached"
                 );
                 if (!isResolved) {
@@ -174,7 +192,7 @@ export class WhatsappBot {
             }
 
             if (connection === "open") {
-              console.log("✅ WhatsApp connection established successfully");
+              this.logger.info("WhatsApp connection established successfully");
               this.reconnectAttempts = 0; // Reset counter on successful connection
               this.startIdleTimer(); // Start idle timeout after connection is established
 
@@ -192,7 +210,7 @@ export class WhatsappBot {
 
           // Handle incoming calls
           if (events.call) {
-            console.log("Incoming call:", events.call);
+            this.logger.info({ call: events.call }, "Incoming call");
           }
 
           // Incoming messages are discarded - no handling needed
@@ -220,7 +238,7 @@ export class WhatsappBot {
           originalReject(...args);
         };
       } catch (error) {
-        console.error("Error creating connection:", error);
+        this.logger.error({ err: error }, "Error creating connection");
         reject(error);
       }
     });
@@ -231,9 +249,9 @@ export class WhatsappBot {
 
     // Handle logout - wipe auth and prepare for new QR scan
     if (reason === DisconnectReason.loggedOut) {
-      console.log("🚪 Device logged out, wiping authentication store...");
+      this.logger.warn("Device logged out, wiping authentication store");
       await this.wipeAuthStore();
-      console.log("📱 Please scan the QR code to re-authenticate");
+      this.logger.info("Please scan the QR code to re-authenticate");
       return true; // Allow reconnection with fresh auth
     }
 
@@ -244,7 +262,10 @@ export class WhatsappBot {
     ];
 
     if (noReconnectReasons.includes(reason)) {
-      console.log("Session invalid, manual intervention required");
+      this.logger.error(
+        { reason },
+        "Session invalid, manual intervention required"
+      );
       return false;
     }
 
@@ -254,7 +275,7 @@ export class WhatsappBot {
   // Helper method to download media from HTTPS URL using axios
   private async downloadFromUrl(url: string): Promise<Buffer> {
     try {
-      console.log(`📥 Downloading media from: ${url}`);
+      this.logger.info({ url }, "Downloading media from URL");
 
       const response = await axios.get(url, {
         responseType: "arraybuffer",
@@ -268,7 +289,10 @@ export class WhatsappBot {
       });
 
       const buffer = Buffer.from(response.data);
-      console.log(`✅ Downloaded ${buffer.length} bytes from URL`);
+      this.logger.info(
+        { url, size: buffer.length },
+        "Downloaded media from URL"
+      );
 
       return buffer;
     } catch (error: any) {
@@ -293,34 +317,37 @@ export class WhatsappBot {
 
       // Check if auth directory exists
       if (!fs.existsSync(authPath)) {
-        console.log("🗂️ Auth directory doesn't exist, nothing to wipe");
+        this.logger.info("Auth directory doesn't exist, nothing to wipe");
         return;
       }
 
       const files = await fs.promises.readdir(authPath);
 
-      console.log(`🧹 Wiping ${files.length} authentication files...`);
+      this.logger.info(
+        { fileCount: files.length },
+        "Wiping authentication files"
+      );
 
       for (const file of files) {
         try {
           await fs.promises.unlink(path.join(authPath, file));
-          console.log(`   ✅ Deleted: ${file}`);
+          this.logger.debug({ file }, "Deleted auth file");
         } catch (error) {
-          console.error(`   ❌ Failed to delete ${file}:`, error);
+          this.logger.error({ err: error, file }, "Failed to delete auth file");
         }
       }
 
       // Remove the directory itself
       try {
         await fs.promises.rmdir(authPath);
-        console.log("🗂️ Auth directory removed");
+        this.logger.info("Auth directory removed");
       } catch (error) {
-        console.error("❌ Failed to remove auth directory:", error);
+        this.logger.error({ err: error }, "Failed to remove auth directory");
       }
 
-      console.log("✅ Authentication store wiped successfully");
+      this.logger.info("Authentication store wiped successfully");
     } catch (error) {
-      console.error("❌ Error wiping auth store:", error);
+      this.logger.error({ err: error }, "Error wiping auth store");
       throw error;
     }
   }
@@ -345,11 +372,11 @@ export class WhatsappBot {
   private async generateLinkPreview(url: string): Promise<any | null> {
     try {
       if (!this.sock) {
-        console.log("⚠️ No socket connection for link preview");
+        this.logger.warn("No socket connection for link preview");
         return null;
       }
 
-      console.log(`🔗 Generating link preview for: ${url}`);
+      this.logger.info({ url }, "Generating link preview");
 
       const linkPreview = await getUrlInfo(url, {
         thumbnailWidth: 1024,
@@ -359,10 +386,10 @@ export class WhatsappBot {
         uploadImage: this.sock.waUploadToServer,
       });
 
-      console.log("✅ Link preview generated successfully");
+      this.logger.info({ url }, "Link preview generated successfully");
       return linkPreview;
     } catch (error: any) {
-      console.error("❌ Failed to generate link preview:", error.message);
+      this.logger.error({ err: error, url }, "Failed to generate link preview");
       // Don't throw - we'll send the message without preview
       return null;
     }
@@ -376,7 +403,7 @@ export class WhatsappBot {
 
     // Check if it's a URL
     if (this.isUrl(media)) {
-      console.log(`📥 Downloading media from URL: ${media}`);
+      this.logger.info({ url: media }, "Downloading media from URL");
       return await this.downloadFromUrl(media);
     }
 
@@ -387,6 +414,8 @@ export class WhatsappBot {
   public async sendMessage(params: SendMessageParams): Promise<boolean> {
     const maxRetries = 3;
     let lastError: Error | null = null;
+    // Normalize phone number format once
+    const phoneNumber = this.normalizePhoneNumber(params.phoneNumber);
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
@@ -394,13 +423,15 @@ export class WhatsappBot {
           await this.ensureConnection();
         }
 
-        // Normalize phone number format
-        const phoneNumber = this.normalizePhoneNumber(params.phoneNumber);
-
-        console.log(`Sending message (attempt ${attempt}/${maxRetries}):`, {
-          to: phoneNumber,
-          messageLength: params.message.length,
-        });
+        this.logger.info(
+          {
+            attempt,
+            maxRetries,
+            to: phoneNumber,
+            messageLength: params.message.length,
+          },
+          "Sending message"
+        );
 
         // Build message content
         const messageContent: any = {
@@ -432,7 +463,7 @@ export class WhatsappBot {
         const success = response?.status !== proto.WebMessageInfo.Status.ERROR;
 
         if (success) {
-          console.log("✅ Message sent successfully");
+          this.logger.info({ to: phoneNumber }, "Message sent successfully");
           this.resetIdleTimer(); // Reset idle timer on successful message send
           return true;
         } else {
@@ -440,15 +471,15 @@ export class WhatsappBot {
         }
       } catch (error: any) {
         lastError = error;
-        console.error(
-          `❌ Send message attempt ${attempt} failed:`,
-          error.message
+        this.logger.error(
+          { err: error, attempt, maxRetries, to: phoneNumber },
+          "Send message attempt failed"
         );
 
         // If it's a timeout or connection error, wait and retry
         if (attempt < maxRetries && this.isRetryableError(error)) {
           const delayMs = 1000 * attempt; // Progressive delay
-          console.log(`Waiting ${delayMs}ms before retry...`);
+          this.logger.debug({ delayMs }, "Waiting before retry");
           await new Promise((resolve) => setTimeout(resolve, delayMs));
 
           // Reset connection for timeout errors
@@ -462,13 +493,18 @@ export class WhatsappBot {
       }
     }
 
-    console.error("❌ All send attempts failed:", lastError?.message);
+    this.logger.error(
+      { err: lastError, to: params.phoneNumber },
+      "All send attempts failed"
+    );
     return false;
   }
 
   public async sendMedia(params: SendMediaParams): Promise<boolean> {
     const maxRetries = 3;
     let lastError: Error | null = null;
+    // Normalize phone number format once
+    const phoneNumber = this.normalizePhoneNumber(params.phoneNumber);
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
@@ -476,11 +512,11 @@ export class WhatsappBot {
           await this.ensureConnection();
         }
 
-        const phoneNumber = this.normalizePhoneNumber(params.phoneNumber);
-
-        console.log(
-          `Sending ${params.mediaType} (attempt ${attempt}/${maxRetries}):`,
+        this.logger.info(
           {
+            attempt,
+            maxRetries,
+            mediaType: params.mediaType,
             to: phoneNumber,
             fileName: params.fileName,
             mediaSource:
@@ -489,13 +525,17 @@ export class WhatsappBot {
                   ? "URL"
                   : "File Path"
                 : "Buffer",
-          }
+          },
+          "Sending media"
         );
 
         // Get media buffer from URL, file path, or existing buffer
         const mediaBuffer = await this.getMediaBuffer(params.media);
 
-        console.log(`📦 Media buffer size: ${mediaBuffer.length} bytes`);
+        this.logger.debug(
+          { mediaType: params.mediaType, size: mediaBuffer.length },
+          "Media buffer prepared"
+        );
 
         let messageContent: AnyMessageContent;
 
@@ -545,7 +585,10 @@ export class WhatsappBot {
         const success = response?.status !== proto.WebMessageInfo.Status.ERROR;
 
         if (success) {
-          console.log(`✅ ${params.mediaType} sent successfully`);
+          this.logger.info(
+            { mediaType: params.mediaType, to: phoneNumber },
+            "Media sent successfully"
+          );
           this.resetIdleTimer(); // Reset idle timer on successful media send
           return true;
         } else {
@@ -553,14 +596,20 @@ export class WhatsappBot {
         }
       } catch (error: any) {
         lastError = error;
-        console.error(
-          `❌ Send ${params.mediaType} attempt ${attempt} failed:`,
-          error.message
+        this.logger.error(
+          {
+            err: error,
+            attempt,
+            maxRetries,
+            mediaType: params.mediaType,
+            to: phoneNumber,
+          },
+          "Send media attempt failed"
         );
 
         if (attempt < maxRetries && this.isRetryableError(error)) {
           const delayMs = 1000 * attempt;
-          console.log(`Waiting ${delayMs}ms before retry...`);
+          this.logger.debug({ delayMs }, "Waiting before retry");
           await new Promise((resolve) => setTimeout(resolve, delayMs));
 
           if (error.message?.includes("Timed Out")) {
@@ -573,9 +622,13 @@ export class WhatsappBot {
       }
     }
 
-    console.error(
-      `❌ All ${params.mediaType} send attempts failed:`,
-      lastError?.message
+    this.logger.error(
+      {
+        err: lastError,
+        mediaType: params.mediaType,
+        to: params.phoneNumber,
+      },
+      "All send media attempts failed"
     );
     return false;
   }
@@ -588,11 +641,6 @@ export class WhatsappBot {
     if (normalized.startsWith("+")) {
       normalized = normalized.substring(1);
     }
-
-    // // Ensure it starts with country code (assuming Saudi Arabia if not present)
-    // if (!normalized.startsWith("966") && normalized.length === 9) {
-    //   normalized = "966" + normalized;
-    // }
 
     return normalized;
   }
@@ -616,7 +664,7 @@ export class WhatsappBot {
 
   private async ensureConnection(): Promise<void> {
     if (!this.sock) {
-      console.log("No active connection, initializing...");
+      this.logger.info("No active connection, initializing");
       await this.init();
     }
   }
@@ -633,18 +681,24 @@ export class WhatsappBot {
         (file) => file.startsWith("session-") && file.endsWith(".json")
       );
 
-      console.log(`Cleaning up ${sessionFiles.length} session files`);
+      this.logger.info(
+        { sessionFileCount: sessionFiles.length },
+        "Cleaning up session files"
+      );
 
       for (const file of sessionFiles) {
         try {
           await fs.promises.unlink(path.join(authPath, file));
-          console.log(`Deleted session file: ${file}`);
+          this.logger.debug({ file }, "Deleted session file");
         } catch (error) {
-          console.error(`Failed to delete ${file}:`, error);
+          this.logger.error(
+            { err: error, file },
+            "Failed to delete session file"
+          );
         }
       }
     } catch (error) {
-      console.error("Session cleanup error:", error);
+      this.logger.error({ err: error }, "Session cleanup error");
     }
   }
 
@@ -653,15 +707,15 @@ export class WhatsappBot {
       this.clearIdleTimer(); // Clear idle timer on disconnect
 
       if (this.sock) {
-        console.log("📱 Disconnecting WhatsApp bot...");
+        this.logger.info("Disconnecting WhatsApp bot");
         // Don't call logout() during normal disconnect to avoid wiping auth
         // Just close the socket gracefully
         this.sock.ws?.close();
         this.sock = undefined;
-        console.log("✅ WhatsApp bot disconnected");
+        this.logger.info("WhatsApp bot disconnected");
       }
     } catch (error) {
-      console.error("❌ Error during disconnect:", error);
+      this.logger.error({ err: error }, "Error during disconnect");
       // Don't throw - we want disconnect to always succeed
     }
   }
@@ -669,19 +723,19 @@ export class WhatsappBot {
   public async forceLogout(): Promise<void> {
     try {
       if (this.sock) {
-        console.log("🚪 Forcing logout and wiping auth store...");
+        this.logger.warn("Forcing logout and wiping auth store");
         await this.sock.logout();
         this.sock = undefined;
       }
       await this.wipeAuthStore();
-      console.log("✅ Forced logout completed");
+      this.logger.info("Forced logout completed");
     } catch (error) {
-      console.error("❌ Error during force logout:", error);
+      this.logger.error({ err: error }, "Error during force logout");
       // Still try to wipe auth store even if logout fails
       try {
         await this.wipeAuthStore();
       } catch (wipeError) {
-        console.error("❌ Failed to wipe auth store:", wipeError);
+        this.logger.error({ err: wipeError }, "Failed to wipe auth store");
       }
     }
   }
@@ -701,7 +755,7 @@ export class WhatsappBot {
   // Idle timeout management methods
   private startIdleTimer(): void {
     this.resetIdleTimer();
-    console.log("⏱️  Idle timer started (5 minutes)");
+    this.logger.info({ timeoutMs: this.IDLE_TIMEOUT_MS }, "Idle timer started");
   }
 
   private resetIdleTimer(): void {
@@ -713,9 +767,12 @@ export class WhatsappBot {
 
     // Set new timeout to disconnect after idle period
     this.idleTimeout = setTimeout(() => {
-      console.log("⏱️  Connection idle for 5 minutes, closing connection...");
+      this.logger.info("Connection idle for 5 minutes, closing connection");
       this.disconnect().catch((error) => {
-        console.error("❌ Error during idle timeout disconnect:", error);
+        this.logger.error(
+          { err: error },
+          "Error during idle timeout disconnect"
+        );
       });
     }, this.IDLE_TIMEOUT_MS);
   }

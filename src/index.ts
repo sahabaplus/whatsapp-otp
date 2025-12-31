@@ -5,12 +5,21 @@ import {
   type INotification,
 } from "./notification_service";
 import { WhatsappBot } from "./whatsapp_bot";
+import P from "pino";
 
 class WhatsAppNotificationApp {
   private whatsappBot: WhatsappBot;
   private notificationService: NotificationService;
   private isShuttingDown = false;
   private statsInterval: NodeJS.Timer | null = null;
+
+  private readonly logger = P(
+    {
+      timestamp: () => `,"time":"${new Date().toJSON()}"`,
+      level: "info",
+    },
+    P.destination("./app-logs.txt")
+  );
 
   constructor() {
     this.whatsappBot = new WhatsappBot();
@@ -22,25 +31,25 @@ class WhatsAppNotificationApp {
 
   async start() {
     try {
-      console.log("🚀 Starting WhatsApp Notification Application...");
+      this.logger.info("Starting WhatsApp Notification Application");
 
       // Initialize WhatsApp bot first
-      console.log("📱 Initializing WhatsApp Bot...");
+      this.logger.info("Initializing WhatsApp Bot");
       await this.whatsappBot.init();
-      console.log("✅ WhatsApp Bot initialized successfully");
+      this.logger.info("WhatsApp Bot initialized successfully");
 
       // Start notification service
-      console.log("🔔 Starting Notification Service...");
+      this.logger.info("Starting Notification Service");
       await this.notificationService.start();
-      console.log("✅ Notification Service started successfully");
+      this.logger.info("Notification Service started successfully");
 
       // Start periodic stats logging
       this.startStatsLogging();
 
-      console.log("🎉 WhatsApp Notification Application is running!");
-      console.log("📊 Use SIGTERM or SIGINT to gracefully shutdown");
+      this.logger.info("WhatsApp Notification Application is running");
+      this.logger.info("Use SIGTERM or SIGINT to gracefully shutdown");
     } catch (error) {
-      console.error("❌ Failed to start application:", error);
+      this.logger.error({ err: error }, "Failed to start application");
       await this.shutdown();
       process.exit(1);
     }
@@ -52,11 +61,14 @@ class WhatsAppNotificationApp {
       NotificationEvents.MESSAGE_RECEIVED,
       async (notification: INotification) => {
         try {
-          console.log("📨 Processing notification:", {
-            phoneNumber: notification.phoneNumber || notification.phone,
-            messageType: notification.mediaType || "text",
-            retryCount: notification.retryCount || 0,
-          });
+          this.logger.info(
+            {
+              phoneNumber: notification.phoneNumber || notification.phone,
+              messageType: notification.mediaType || "text",
+              retryCount: notification.retryCount || 0,
+            },
+            "Processing notification"
+          );
 
           let success = false;
 
@@ -85,9 +97,20 @@ class WhatsAppNotificationApp {
             throw new Error("Message sending failed");
           }
 
-          console.log("✅ Message processed successfully");
+          this.logger.info(
+            {
+              phoneNumber: notification.phoneNumber || notification.phone,
+            },
+            "Message processed successfully"
+          );
         } catch (error) {
-          console.error("❌ Error processing notification:", error);
+          this.logger.error(
+            {
+              err: error,
+              phoneNumber: notification.phoneNumber || notification.phone,
+            },
+            "Error processing notification"
+          );
 
           // Handle failed message with retry logic
           await this.notificationService.handleFailedMessage(
@@ -103,36 +126,39 @@ class WhatsAppNotificationApp {
     this.notificationService.on(
       NotificationEvents.PROCESSING_ERROR,
       (error) => {
-        console.error("❌ Processing error:", error);
+        this.logger.error({ err: error }, "Processing error");
       }
     );
 
     // Handle service errors
     this.notificationService.on(NotificationEvents.SERVICE_ERROR, (error) => {
-      console.error("❌ Service error:", error);
+      this.logger.error({ err: error }, "Service error");
 
       // Log WhatsApp connection status for debugging
       const connectionInfo = this.whatsappBot.getConnectionInfo();
-      console.log("📱 WhatsApp connection status:", connectionInfo);
+      this.logger.debug({ connectionInfo }, "WhatsApp connection status");
     });
 
     // Handle service lifecycle events
     this.notificationService.on(NotificationEvents.SERVICE_STARTED, () => {
-      console.log("✅ Notification service started");
+      this.logger.info("Notification service started");
     });
 
     this.notificationService.on(NotificationEvents.SERVICE_STOPPED, () => {
-      console.log("🛑 Notification service stopped");
+      this.logger.info("Notification service stopped");
     });
 
     this.notificationService.on(
       NotificationEvents.RETRY_FAILED,
       (notification) => {
-        console.error("❌ Message failed after all retries:", {
-          phoneNumber: notification.phoneNumber || notification.phone,
-          retryCount: notification.retryCount,
-          lastError: notification.lastError,
-        });
+        this.logger.error(
+          {
+            phoneNumber: notification.phoneNumber || notification.phone,
+            retryCount: notification.retryCount,
+            lastError: notification.lastError,
+          },
+          "Message failed after all retries"
+        );
       }
     );
   }
@@ -143,28 +169,32 @@ class WhatsAppNotificationApp {
         const queueStats = await this.notificationService.getQueueStats();
         const connectionInfo = this.whatsappBot.getConnectionInfo();
 
-        console.log("📊 Application Status:", {
-          timestamp: new Date().toISOString(),
-          whatsapp: {
-            connected: connectionInfo.isConnected,
-            reconnectAttempts: connectionInfo.reconnectAttempts,
+        this.logger.info(
+          {
+            timestamp: new Date().toISOString(),
+            whatsapp: {
+              connected: connectionInfo.isConnected,
+              reconnectAttempts: connectionInfo.reconnectAttempts,
+            },
+            queues: queueStats,
           },
-          queues: queueStats,
-        });
+          "Application Status"
+        );
 
         // Alert if queues are backing up
         if (queueStats.total > 100) {
-          console.warn("⚠️  Warning: High queue backlog detected!", queueStats);
+          this.logger.warn({ queueStats }, "High queue backlog detected");
         }
 
         // Alert if failed queue is growing
         if (queueStats.failedQueue > 10) {
-          console.warn("⚠️  Warning: Many messages in failed queue!", {
-            failedCount: queueStats.failedQueue,
-          });
+          this.logger.warn(
+            { failedCount: queueStats.failedQueue },
+            "Many messages in failed queue"
+          );
         }
       } catch (error) {
-        console.error("❌ Error getting application stats:", error);
+        this.logger.error({ err: error }, "Error getting application stats");
       }
     }, 30000); // Log stats every 30 seconds
   }
@@ -172,11 +202,14 @@ class WhatsAppNotificationApp {
   private setupGracefulShutdown() {
     const handleShutdown = async (signal: string) => {
       if (this.isShuttingDown) {
-        console.log("🔄 Shutdown already in progress...");
+        this.logger.info("Shutdown already in progress");
         return;
       }
 
-      console.log(`\n🛑 Received ${signal}. Starting graceful shutdown...`);
+      this.logger.info(
+        { signal },
+        "Received shutdown signal, starting graceful shutdown"
+      );
       this.isShuttingDown = true;
 
       await this.shutdown();
@@ -189,21 +222,21 @@ class WhatsAppNotificationApp {
 
     // Handle uncaught exceptions
     process.on("uncaughtException", async (error) => {
-      console.error("💥 Uncaught Exception:", error);
+      this.logger.error({ err: error }, "Uncaught Exception");
       await this.shutdown();
       process.exit(1);
     });
 
     // Handle unhandled promise rejections
     process.on("unhandledRejection", async (reason, promise) => {
-      console.error("💥 Unhandled Rejection at:", promise, "reason:", reason);
+      this.logger.error({ reason, promise }, "Unhandled Rejection");
       await this.shutdown();
       process.exit(1);
     });
   }
 
   private async shutdown() {
-    console.log("🧹 Cleaning up application...");
+    this.logger.info("Cleaning up application");
 
     try {
       // Stop stats logging
@@ -213,16 +246,16 @@ class WhatsAppNotificationApp {
       }
 
       // Stop notification service
-      console.log("🔔 Stopping notification service...");
+      this.logger.info("Stopping notification service");
       await this.notificationService.stop();
 
       // Disconnect WhatsApp bot
-      console.log("📱 Disconnecting WhatsApp bot...");
+      this.logger.info("Disconnecting WhatsApp bot");
       await this.whatsappBot.disconnect();
 
-      console.log("✅ Application shutdown complete");
+      this.logger.info("Application shutdown complete");
     } catch (error) {
-      console.error("❌ Error during shutdown:", error);
+      this.logger.error({ err: error }, "Error during shutdown");
     }
   }
 
@@ -240,10 +273,19 @@ class WhatsAppNotificationApp {
   }
 
   public async reprocessFailedMessages(limit: number = 10) {
-    console.log(`🔄 Manually reprocessing ${limit} failed messages...`);
+    this.logger.info({ limit }, "Manually reprocessing failed messages");
     await this.notificationService.reprocessFailedMessages(limit);
   }
 }
+
+// Create logger for main function
+const mainLogger = P(
+  {
+    timestamp: () => `,"time":"${new Date().toJSON()}"`,
+    level: "info",
+  },
+  P.destination("./app-logs.txt")
+);
 
 // Create and start the application
 async function main() {
@@ -255,13 +297,13 @@ async function main() {
     // Keep the process running
     process.stdin.resume();
   } catch (error) {
-    console.error("💥 Application startup failed:", error);
+    mainLogger.error({ err: error }, "Application startup failed");
     process.exit(1);
   }
 }
 
 // Start the application
 main().catch((error) => {
-  console.error("💥 Fatal error:", error);
+  mainLogger.error({ err: error }, "Fatal error");
   process.exit(1);
 });
