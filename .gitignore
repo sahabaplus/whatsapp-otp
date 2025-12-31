@@ -1,6 +1,10 @@
 # Based on https://raw.githubusercontent.com/github/gitignore/main/Node.gitignore
 /baileys_auth_info
 
+.volume
+__Dockerfile
+.json
+.txt
 wa-logs.txt
 
 # Logs
