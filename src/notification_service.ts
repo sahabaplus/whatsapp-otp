@@ -1,7 +1,8 @@
 // notification_service.ts
 import redis from "redis";
 import { EventEmitter } from "events";
-import P from "pino";
+import pino from "pino";
+import { createPinoTransports } from "./logger";
 
 export interface INotification {
   phoneNumber?: string; // Make optional to handle both formats
@@ -40,12 +41,11 @@ export class NotificationService extends EventEmitter {
   private maxRetries: number = 3;
   private retryDelay: number = 30000; // 30 seconds
 
-  private readonly logger = P(
+  private readonly logger = pino(
     {
-      timestamp: () => `,"time":"${new Date().toJSON()}"`,
-      level: "info",
+      level: process.env.LOG_LEVEL || (process.env.NODE_ENV === "production" ? "info" : "debug"),
     },
-    P.destination("./notification-logs.txt")
+    pino.transport(createPinoTransports())
   );
 
   constructor() {

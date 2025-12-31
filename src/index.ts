@@ -5,7 +5,8 @@ import {
   type INotification,
 } from "./notification_service";
 import { WhatsappBot } from "./whatsapp_bot";
-import P from "pino";
+import pino from "pino";
+import { createPinoTransports } from "./logger";
 
 class WhatsAppNotificationApp {
   private whatsappBot: WhatsappBot;
@@ -13,12 +14,13 @@ class WhatsAppNotificationApp {
   private isShuttingDown = false;
   private statsInterval: NodeJS.Timer | null = null;
 
-  private readonly logger = P(
+  private readonly logger = pino(
     {
-      timestamp: () => `,"time":"${new Date().toJSON()}"`,
-      level: "info",
+      level:
+        process.env.LOG_LEVEL ||
+        (process.env.NODE_ENV === "production" ? "info" : "debug"),
     },
-    P.destination("./app-logs.txt")
+    pino.transport(createPinoTransports())
   );
 
   constructor() {
@@ -279,12 +281,13 @@ class WhatsAppNotificationApp {
 }
 
 // Create logger for main function
-const mainLogger = P(
+const mainLogger = pino(
   {
-    timestamp: () => `,"time":"${new Date().toJSON()}"`,
-    level: "info",
+    level:
+      process.env.LOG_LEVEL ||
+      (process.env.NODE_ENV === "production" ? "info" : "debug"),
   },
-  P.destination("./app-logs.txt")
+  pino.transport(createPinoTransports())
 );
 
 // Create and start the application

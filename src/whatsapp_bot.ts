@@ -10,7 +10,7 @@ import makeWASocket, {
   downloadMediaMessage,
   getUrlInfo,
 } from "@whiskeysockets/baileys";
-import P from "pino";
+import pino from "pino";
 import NodeCache from "node-cache";
 import { Boom } from "@hapi/boom";
 import fs from "fs";
@@ -18,6 +18,7 @@ import path from "path";
 import axios from "axios";
 import { URL } from "url";
 import qrcode from "qrcode-terminal";
+import { createPinoTransports } from "./logger";
 
 interface SendMessageParams {
   phoneNumber: string;
@@ -48,12 +49,13 @@ export class WhatsappBot {
   private idleTimeout: NodeJS.Timeout | null = null;
   private lastActivityTime: number | null = null;
 
-  private readonly logger = P(
+  private readonly logger = pino(
     {
-      timestamp: () => `,"time":"${new Date().toJSON()}"`,
-      level: "info",
+      level:
+        process.env.LOG_LEVEL ||
+        (process.env.NODE_ENV === "production" ? "info" : "debug"),
     },
-    P.destination("./wa-logs.txt")
+    pino.transport(createPinoTransports())
   );
 
   constructor() {
@@ -419,9 +421,8 @@ export class WhatsappBot {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        if (!this.sock) {
-          await this.ensureConnection();
-        }
+        // Ensure connection is active before sending
+        await this.ensureConnection();
 
         this.logger.info(
           {
@@ -508,9 +509,8 @@ export class WhatsappBot {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        if (!this.sock) {
-          await this.ensureConnection();
-        }
+        // Ensure connection is active before sending
+        await this.ensureConnection();
 
         this.logger.info(
           {
@@ -663,9 +663,19 @@ export class WhatsappBot {
   }
 
   private async ensureConnection(): Promise<void> {
+    // If already connecting, wait for that connection
+    if (this.isConnecting && this.connectionPromise) {
+      this.logger.debug("Connection already in progress, waiting");
+      await this.connectionPromise;
+      return;
+    }
+
+    // Check if we need to reconnect
     if (!this.sock) {
-      this.logger.info("No active connection, initializing");
+      this.logger.info("No active connection, reconnecting for new message");
       await this.init();
+      // Idle timer will be started automatically when connection opens
+      this.logger.info("Reconnection complete, ready to send message");
     }
   }
 
