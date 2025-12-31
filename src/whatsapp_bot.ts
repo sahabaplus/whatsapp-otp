@@ -7,10 +7,7 @@ import makeWASocket, {
   proto,
   useMultiFileAuthState,
   type AnyMessageContent,
-  type WAMessageContent,
-  type WAMessageKey,
   downloadMediaMessage,
-  getContentType,
   getUrlInfo,
 } from "@whiskeysockets/baileys";
 import P from "pino";
@@ -46,8 +43,10 @@ export class WhatsappBot {
   private isConnecting = false;
   private connectionPromise: Promise<void> | null = null;
 
-  // Simple message store for getMessage callback
-  private messageStore = new Map<string, WAMessageContent>();
+  // Idle timeout management
+  private readonly IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+  private idleTimeout: NodeJS.Timeout | null = null;
+  private lastActivityTime: number | null = null;
 
   private readonly logger = P(
     {
@@ -58,19 +57,7 @@ export class WhatsappBot {
   );
 
   constructor() {
-    // Setup periodic cleanup of old messages from store
-    setInterval(() => {
-      // Keep only last 1000 messages to prevent memory issues
-      if (this.messageStore.size > 1000) {
-        const entries = Array.from(this.messageStore.entries());
-        const toKeep = entries.slice(-500); // Keep last 500
-        this.messageStore.clear();
-        toKeep.forEach(([key, value]) => this.messageStore.set(key, value));
-        console.log(
-          `🧹 Cleaned up message store, kept ${toKeep.length} messages`
-        );
-      }
-    }, 60000); // Cleanup every minute
+    // No message store cleanup needed - incoming messages are discarded
   }
 
   async init(): Promise<void> {
@@ -110,7 +97,6 @@ export class WhatsappBot {
           msgRetryCounterCache: new NodeCache(),
           generateHighQualityLinkPreview: true,
           syncFullHistory: false,
-          getMessage: this.getMessage.bind(this),
           // Add connection options for better stability
           connectTimeoutMs: 60_000,
           defaultQueryTimeoutMs: 60_000,
@@ -190,6 +176,7 @@ export class WhatsappBot {
             if (connection === "open") {
               console.log("✅ WhatsApp connection established successfully");
               this.reconnectAttempts = 0; // Reset counter on successful connection
+              this.startIdleTimer(); // Start idle timeout after connection is established
 
               if (!isResolved) {
                 isResolved = true;
@@ -208,27 +195,7 @@ export class WhatsappBot {
             console.log("Incoming call:", events.call);
           }
 
-          // Handle incoming messages (for logging/processing and store in our simple store)
-          if (events["messages.upsert"]) {
-            const { messages } = events["messages.upsert"];
-            messages.forEach((msg) => {
-              // Store message for getMessage callback
-              if (msg.key?.id && msg.message) {
-                const messageKey = `${msg.key.remoteJid}:${msg.key.id}`;
-                this.messageStore.set(messageKey, msg.message);
-              }
-
-              if (!msg.key.fromMe) {
-                console.log("Received message:", {
-                  from: msg.key.remoteJid,
-                  messageType: getContentType(msg.message || undefined),
-                  timestamp: msg.messageTimestamp
-                    ? new Date(Number(msg.messageTimestamp) * 1000)
-                    : new Date(),
-                });
-              }
-            });
-          }
+          // Incoming messages are discarded - no handling needed
         });
 
         // Set a timeout for the initial connection
@@ -282,21 +249,6 @@ export class WhatsappBot {
     }
 
     return true;
-  }
-
-  private async getMessage(
-    key: WAMessageKey
-  ): Promise<WAMessageContent | undefined> {
-    // Try to get message from our simple store
-    const messageKey = `${key.remoteJid}:${key.id}`;
-    const storedMessage = this.messageStore.get(messageKey);
-
-    if (storedMessage) {
-      return storedMessage;
-    }
-
-    // Return empty message if not found
-    return proto.Message.fromObject({});
   }
 
   // Helper method to download media from HTTPS URL using axios
@@ -481,6 +433,7 @@ export class WhatsappBot {
 
         if (success) {
           console.log("✅ Message sent successfully");
+          this.resetIdleTimer(); // Reset idle timer on successful message send
           return true;
         } else {
           throw new Error(`Message failed with status: ${response?.status}`);
@@ -593,6 +546,7 @@ export class WhatsappBot {
 
         if (success) {
           console.log(`✅ ${params.mediaType} sent successfully`);
+          this.resetIdleTimer(); // Reset idle timer on successful media send
           return true;
         } else {
           throw new Error(`Media failed with status: ${response?.status}`);
@@ -696,6 +650,8 @@ export class WhatsappBot {
 
   public async disconnect(): Promise<void> {
     try {
+      this.clearIdleTimer(); // Clear idle timer on disconnect
+
       if (this.sock) {
         console.log("📱 Disconnecting WhatsApp bot...");
         // Don't call logout() during normal disconnect to avoid wiping auth
@@ -704,10 +660,6 @@ export class WhatsappBot {
         this.sock = undefined;
         console.log("✅ WhatsApp bot disconnected");
       }
-
-      // Clear message store
-      this.messageStore.clear();
-      console.log("🧹 Cleared message store");
     } catch (error) {
       console.error("❌ Error during disconnect:", error);
       // Don't throw - we want disconnect to always succeed
@@ -744,5 +696,35 @@ export class WhatsappBot {
       reconnectAttempts: this.reconnectAttempts,
       maxReconnectAttempts: this.maxReconnectAttempts,
     };
+  }
+
+  // Idle timeout management methods
+  private startIdleTimer(): void {
+    this.resetIdleTimer();
+    console.log("⏱️  Idle timer started (5 minutes)");
+  }
+
+  private resetIdleTimer(): void {
+    // Clear existing timeout
+    this.clearIdleTimer();
+
+    // Set new activity time
+    this.lastActivityTime = Date.now();
+
+    // Set new timeout to disconnect after idle period
+    this.idleTimeout = setTimeout(() => {
+      console.log("⏱️  Connection idle for 5 minutes, closing connection...");
+      this.disconnect().catch((error) => {
+        console.error("❌ Error during idle timeout disconnect:", error);
+      });
+    }, this.IDLE_TIMEOUT_MS);
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimeout) {
+      clearTimeout(this.idleTimeout);
+      this.idleTimeout = null;
+    }
+    this.lastActivityTime = null;
   }
 }
