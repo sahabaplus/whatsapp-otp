@@ -635,10 +635,10 @@ export class WhatsappBot {
       normalized = normalized.substring(1);
     }
 
-    // Ensure it starts with country code (assuming Saudi Arabia if not present)
-    if (!normalized.startsWith("966") && normalized.length === 9) {
-      normalized = "966" + normalized;
-    }
+    // // Ensure it starts with country code (assuming Saudi Arabia if not present)
+    // if (!normalized.startsWith("966") && normalized.length === 9) {
+    //   normalized = "966" + normalized;
+    // }
 
     return normalized;
   }
